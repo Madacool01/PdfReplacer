@@ -11,6 +11,8 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
    - Untick one to change just that: e.g. untick only "Original color"
      and pick red Text color = same font and size, but red
    - Untick "Original font" to choose Font, "Original size" for Size
+   - Only the replacement changes: the rest of the word keeps its
+     original look (e.g. DIA->PIA in red gives red PIA + black PHRAGM)
    - Tick Bold / Italic / Underline / Highlight as you like
    - Highlight color button to change yellow to anything
 5. Save to: choose output folder (default "fixed"). Originals are NEVER changed.

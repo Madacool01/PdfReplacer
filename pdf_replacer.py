@@ -581,8 +581,9 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                 rect = rj["rect"]
                 span = rj["span"]
                 new_text = rj["new_text"]
-                # per-attribute style: font / size / color each either
-                # inherited from the original span or taken from custom UI
+                rep_spans = sorted(rj.get("rep_spans", []))
+                # Original style: untouched parts of the line ALWAYS keep
+                # this, so only the replacement visibly changes.
                 if span:
                     det_fam, det_b, det_i = detect_family_and_flags(span.get("font", ""))
                     orig_size = float(span.get("size", 11))
@@ -597,44 +598,84 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                     orig_size, orig_rgb = float(opts["custom_size"]), hex_to_rgb(opts["custom_hex"])
                     base_y = rect.y1 - 2
                     orig_font = ""
+                # Replacement style: per-attribute original/custom mix.
+                # Bold/Italic ticks apply to the replacement only.
                 if keep_font and span:
-                    fam, b, i = det_fam, det_b, det_i
+                    rep_fam, rep_b, rep_i = det_fam, det_b, det_i
                 else:
-                    fam, b, i = opts["custom_family"], opts["bold"], opts["italic"]
+                    rep_fam, rep_b, rep_i = opts["custom_family"], opts["bold"], opts["italic"]
                 if opts["bold"]:
-                    b = True
+                    rep_b = True
                 if opts["italic"]:
-                    i = True
-                fontname = BASE_FONTS.get((fam, b, i), "helv")
+                    rep_i = True
+                rep_fontname = BASE_FONTS.get((rep_fam, rep_b, rep_i), "helv")
                 if keep_font and span:
-                    fontfile = resolve_font(doc, orig_font, b, i, new_text)
+                    rep_fontfile = resolve_font(doc, orig_font, rep_b, rep_i, new_text)
                 else:
-                    fontfile = None
+                    rep_fontfile = None
                     # custom font: map chosen family to a real ttf when possible
-                    fam_to_probe = {"helv": "arial.ttf", "tiro": "times.ttf", "cour": "cour.ttf"}.get(fam, "")
+                    fam_to_probe = {"helv": "arial.ttf", "tiro": "times.ttf", "cour": "cour.ttf"}.get(rep_fam, "")
                     if fam_to_probe:
                         import os as _os2
                         _p = _os2.path.join(_os2.environ.get("WINDIR", r"C:\Windows"), "Fonts", fam_to_probe)
                         if _os2.path.exists(_p):
-                            fontfile = _p
-                size = orig_size if (keep_size and span) else float(opts["custom_size"])
-                rgb = orig_rgb if (keep_color and span) else hex_to_rgb(opts["custom_hex"])
-                # shrink-to-fit against the ORIGINAL line width so longer text
-                # never spills over neighbouring symbols/words
+                            rep_fontfile = _p
+                rep_size = orig_size if (keep_size and span) else float(opts["custom_size"])
+                rep_rgb = orig_rgb if (keep_color and span) else hex_to_rgb(opts["custom_hex"])
+                # Original-segment style (remainder of the line)
+                orig_fontname = BASE_FONTS.get((det_fam, det_b, det_i), "helv")
+                if span:
+                    orig_fontfile = resolve_font(doc, orig_font, det_b, det_i, new_text)
+                else:
+                    orig_fontfile = rep_fontfile
+                # Split the rewritten line: replacement parts get the new
+                # style, untouched parts keep the original style.
+                segs = []  # (text, is_replacement)
+                _pos = 0
+                for (_rs, _re) in rep_spans:
+                    if _rs > _pos:
+                        segs.append((new_text[_pos:_rs], False))
+                    if _re > _rs:
+                        segs.append((new_text[_rs:_re], True))
+                    _pos = max(_pos, _re)
+                if _pos < len(new_text):
+                    segs.append((new_text[_pos:], False))
+                if not segs:
+                    segs = [(new_text, True)]
+                # shrink-to-fit against the ORIGINAL line width so longer
+                # text never spills over neighbouring symbols/words; scale
+                # both parts uniformly to keep the line harmonious
                 if new_text:
                     try:
-                        w = measure_width(new_text, fontname, size, fontfile)
+                        _wrep = sum(measure_width(t, rep_fontname, rep_size, rep_fontfile) for t, r in segs if r)
+                        _worg = sum(measure_width(t, orig_fontname, orig_size, orig_fontfile) for t, r in segs if not r)
                         avail = max(rect.width, 5)
-                        if w > avail + 0.5:
-                            size = max(4.0, size * (avail / w))
+                        if _wrep + _worg > avail + 0.5:
+                            _f = avail / max(_wrep + _worg, 0.01)
+                            rep_size = max(4.0, rep_size * _f)
+                            orig_size = max(4.0, orig_size * _f)
                     except Exception:
                         pass
                 x = rect.x0
-                eff_fontname = _embed_fontname(fontfile) if fontfile else fontname
-                jobs.append({"rect": rect, "fontname": eff_fontname, "fontfile": fontfile,
-                             "size": size, "rgb": rgb, "base_y": base_y,
+                eff_rep = _embed_fontname(rep_fontfile) if rep_fontfile else rep_fontname
+                eff_orig = _embed_fontname(orig_fontfile) if orig_fontfile else orig_fontname
+                seg_objs = []
+                for (_t, _isrep) in segs:
+                    if _t == "":
+                        continue
+                    if _isrep:
+                        seg_objs.append({"text": _t, "fontname": eff_rep, "fontfile": rep_fontfile,
+                                         "size": rep_size, "rgb": rep_rgb, "is_rep": True})
+                    else:
+                        seg_objs.append({"text": _t, "fontname": eff_orig, "fontfile": orig_fontfile,
+                                         "size": orig_size, "rgb": orig_rgb, "is_rep": False})
+                jobs.append({"rect": rect, "base_y": base_y,
                              "new_text": new_text, "count": rj["count"],
-                             "rep_spans": rj.get("rep_spans", [])})
+                             "rep_spans": rep_spans, "segs": seg_objs,
+                             "rep_rgb": rep_rgb,
+                             # legacy single-style keys (first segment style)
+                             "fontname": eff_rep, "fontfile": rep_fontfile,
+                             "size": rep_size, "rgb": rep_rgb})
 
             # redact whole lines but CLAMPED so a tight label stack
             # (e.g. DIAPHR AGM above PUMP, 0.38pt apart) never deletes the
@@ -691,41 +732,42 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                 except Exception:
                     pass
 
-            # insert new full-line text at original baseline
+            # insert new line segment by segment at original baseline:
+            # replacement parts use the new style, untouched parts keep
+            # the original style, so e.g. only PIA turns red.
             for j in jobs:
                 rect = j["rect"]
                 x = rect.x0
                 y = j["base_y"]
                 if x < 0:
                     x = 0
-                kwargs = dict(fontname=j["fontname"], fontsize=j["size"], color=j["rgb"])
-                if j["fontfile"]:
-                    kwargs["fontfile"] = j["fontfile"]
-                try:
-                    page.insert_text(pymupdf.Point(x, y), j["new_text"], **kwargs)
-                except Exception:
-                    try:
-                        page.insert_text(pymupdf.Point(x, y), j["new_text"],
-                                         fontname=j["fontname"], fontsize=j["size"], color=j["rgb"])
-                    except Exception:
-                        page.insert_text(pymupdf.Point(x, y), j["new_text"],
-                                         fontsize=j["size"], color=j["rgb"])
-                total += j["count"]
-                # Scope highlight/underline to just the inserted replacement
-                # substring(s), not the whole rewritten line. Positions are
-                # derived from prefix widths in the final (possibly shrunk) size.
                 scope_rects = []
-                try:
-                    for (rs, re_) in j.get("rep_spans", []):
-                        if re_ <= rs:
-                            continue  # deletion: nothing to mark
-                        pre_w = measure_width(j["new_text"][:rs], j["fontname"], j["size"], j["fontfile"])
-                        rep_w = measure_width(j["new_text"][rs:re_], j["fontname"], j["size"], j["fontfile"])
-                        rx0 = x + pre_w
-                        rx1 = min(page.rect.x1 - 1, rx0 + rep_w + 1)
-                        scope_rects.append(pymupdf.Rect(rx0, rect.y0, rx1, rect.y1))
-                except Exception:
-                    scope_rects = []
+                _cur = x
+                for _sg in j.get("segs", []):
+                    _t = _sg["text"]
+                    if _t == "":
+                        continue
+                    kwargs = dict(fontname=_sg["fontname"], fontsize=_sg["size"], color=_sg["rgb"])
+                    if _sg["fontfile"]:
+                        kwargs["fontfile"] = _sg["fontfile"]
+                    try:
+                        page.insert_text(pymupdf.Point(_cur, y), _t, **kwargs)
+                    except Exception:
+                        try:
+                            page.insert_text(pymupdf.Point(_cur, y), _t,
+                                             fontname=_sg["fontname"], fontsize=_sg["size"], color=_sg["rgb"])
+                        except Exception:
+                            page.insert_text(pymupdf.Point(_cur, y), _t,
+                                             fontsize=_sg["size"], color=_sg["rgb"])
+                    try:
+                        _w = measure_width(_t, _sg["fontname"], _sg["size"], _sg["fontfile"])
+                    except Exception:
+                        _w = 0
+                    if _sg.get("is_rep"):
+                        scope_rects.append(pymupdf.Rect(_cur, rect.y0,
+                                                        min(page.rect.x1 - 1, _cur + _w + 1), rect.y1))
+                    _cur += _w
+                total += j["count"]
                 if not scope_rects:
                     # fallback (e.g. deletion with highlight on): whole line
                     try:
