@@ -3,7 +3,6 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
 1. Double-click dist\DadPdfReplacer.exe
 2. Click "Add PDFs" (pick files) or "Add Folder" (all 130 at once)
 3. Type Find (old keyword) and Replace with (new keyword)
-   - Whole word only: ON = safer (recommended)
    - Match case: OFF unless capitals matter
    - Where: pick "PDF text", "Bookmarks" (chapter names), or both.
      E.g. Find "book" / Replace "paper" with Bookmarks = every

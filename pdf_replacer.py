@@ -648,7 +648,7 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
     Returns (total_count, warning_or_None, text_count, bookmark_count)
     """
     match_case = opts["match_case"]
-    whole_word = opts["whole_word"]
+    whole_word = opts.get("whole_word", False)
     _legacy_keep = opts.get("keep_original", True)
     keep_font = opts.get("keep_font", _legacy_keep)
     keep_size = opts.get("keep_size", _legacy_keep)
@@ -975,7 +975,6 @@ class App(tk.Tk):
         self.var_find = tk.StringVar()
         self.var_replace = tk.StringVar()
         self.var_case = tk.BooleanVar(value=False)
-        self.var_whole = tk.BooleanVar(value=True)
         self.var_scope = tk.StringVar(value="text")
         self.var_keep_font = tk.BooleanVar(value=True)
         self.var_keep_size = tk.BooleanVar(value=True)
@@ -1017,7 +1016,6 @@ class App(tk.Tk):
         of = tk.Frame(self)
         of.pack(fill="x", padx=10)
         tk.Checkbutton(of, text="Match case", variable=self.var_case, font=("Arial", 10)).pack(side="left")
-        tk.Checkbutton(of, text="Whole word only", variable=self.var_whole, font=("Arial", 10)).pack(side="left", padx=12)
         wf = tk.Frame(self)
         wf.pack(fill="x", padx=10, pady=4)
         tk.Label(wf, text="Where:", font=("Arial", 10)).pack(side="left")
@@ -1155,7 +1153,7 @@ class App(tk.Tk):
         scope = self.var_scope.get()
         return {
             "match_case": self.var_case.get(),
-            "whole_word": self.var_whole.get(),
+            "whole_word": False,
             "replace_text": scope in ("text", "both"),
             "replace_bookmarks": scope in ("bookmarks", "both"),
             "keep_original": bool(kf and ks and kc),  # legacy compat
