@@ -25,6 +25,8 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
 
 Tips:
 - If the new word is longer, it auto-shrinks a bit to fit (no overlap).
+- Original text direction is kept: vertical labels stay vertical,
+  horizontal stay horizontal (any angle works).
 - Encrypted/password PDFs are skipped with a message.
 - Run again with another keyword any time - one pair per run.
 

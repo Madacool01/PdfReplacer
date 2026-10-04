@@ -386,6 +386,37 @@ def _sub_line_text_ex(line_text, find_str, replace_str, match_case, whole_word):
     return "".join(out), n, spans
 
 
+def _line_direction(line_dir):
+    """Normalize a dict line['dir'] vector; fall back to horizontal."""
+    try:
+        dx, dy = float(line_dir[0]), float(line_dir[1])
+    except Exception:
+        return (1.0, 0.0)
+    import math as _m
+    n = _m.hypot(dx, dy)
+    if n < 1e-9:
+        return (1.0, 0.0)
+    return (dx / n, dy / n)
+
+
+def _rotation_for_direction(dx, dy):
+    """Insertion transform following direction (dx, dy).
+
+    Returns (rotate_int_or_None, morph_matrix_or_None). Axis-aligned
+    text uses insert_text(rotate=...) (exact round-trip; rotate only
+    accepts 0/90/180/270); any other angle uses a morph rotation
+    matrix. Dict coords are y-down, so R = atan2(-dy, dx).
+    """
+    import math as _m
+    ang = _m.degrees(_m.atan2(-dy, dx)) % 360.0
+    for cand in (0, 90, 180, 270):
+        if abs((ang - cand + 180.0) % 360.0 - 180.0) < 2.0:
+            return cand, None
+    r = _m.radians(ang)
+    return None, (round(_m.cos(r), 6), round(_m.sin(r), 6),
+                  round(-_m.sin(r), 6), round(_m.cos(r), 6), 0.0, 0.0)
+
+
 def _embed_fontname(fontfile):
     """Unique reference name for an embedded TTF.
 
@@ -523,7 +554,8 @@ def collect_line_jobs(page, find_str, replace_str, match_case, whole_word):
             except Exception:
                 continue
             jobs.append({"rect": lb, "new_text": new_text, "count": n, "span": dom,
-                         "old_text": line_text, "rep_spans": rep_spans})
+                         "old_text": line_text, "rep_spans": rep_spans,
+                         "dir": _line_direction(line.get("dir", (1, 0)))})
     return jobs
 
 
@@ -667,15 +699,23 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                     orig_size = float(span.get("size", 11))
                     orig_rgb = int_to_rgb(span.get("color", 0))
                     try:
-                        base_y = float(span.get("origin", [rect.x0, rect.y1 - 2])[1])
+                        _org = span.get("origin", [rect.x0, rect.y1 - 2])
+                        ox, oy = float(_org[0]), float(_org[1])
+                        base_y = oy
                     except Exception:
-                        base_y = rect.y1 - 2
+                        ox, oy = rect.x0, rect.y1 - 2
+                        base_y = oy
                     orig_font = span.get("font", "")
                 else:
                     det_fam, det_b, det_i = opts["custom_family"], opts["bold"], opts["italic"]
                     orig_size, orig_rgb = float(opts["custom_size"]), hex_to_rgb(opts["custom_hex"])
-                    base_y = rect.y1 - 2
+                    ox, oy = rect.x0, rect.y1 - 2
+                    base_y = oy
                     orig_font = ""
+                # writing direction of the original line: replacements are
+                # inserted along it so vertical text stays vertical, etc.
+                ddx, ddy = rj.get("dir", (1.0, 0.0)) if span else (1.0, 0.0)
+                rot, morphmat = _rotation_for_direction(ddx, ddy)
                 # Replacement style: per-attribute original/custom mix.
                 # Bold/Italic ticks apply to the replacement only.
                 if keep_font and span:
@@ -720,21 +760,22 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                     segs.append((new_text[_pos:], False))
                 if not segs:
                     segs = [(new_text, True)]
-                # shrink-to-fit against the ORIGINAL line width so longer
-                # text never spills over neighbouring symbols/words; scale
-                # both parts uniformly to keep the line harmonious
+                # shrink-to-fit against the ORIGINAL line LENGTH (width for
+                # horizontal, height for vertical) so longer text never
+                # spills over neighbouring symbols/words; scale both parts
+                # uniformly to keep the line harmonious
                 if new_text:
                     try:
                         _wrep = sum(measure_width(t, rep_fontname, rep_size, rep_fontfile) for t, r in segs if r)
                         _worg = sum(measure_width(t, orig_fontname, orig_size, orig_fontfile) for t, r in segs if not r)
-                        avail = max(rect.width, 5)
+                        _linelen = rect.height if abs(ddy) > abs(ddx) else rect.width
+                        avail = max(_linelen, 5)
                         if _wrep + _worg > avail + 0.5:
                             _f = avail / max(_wrep + _worg, 0.01)
                             rep_size = max(4.0, rep_size * _f)
                             orig_size = max(4.0, orig_size * _f)
                     except Exception:
                         pass
-                x = rect.x0
                 eff_rep = _embed_fontname(rep_fontfile) if rep_fontfile else rep_fontname
                 eff_orig = _embed_fontname(orig_fontfile) if orig_fontfile else orig_fontname
                 seg_objs = []
@@ -747,7 +788,8 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                     else:
                         seg_objs.append({"text": _t, "fontname": eff_orig, "fontfile": orig_fontfile,
                                          "size": orig_size, "rgb": orig_rgb, "is_rep": False})
-                jobs.append({"rect": rect, "base_y": base_y,
+                jobs.append({"rect": rect, "base_y": base_y, "ox": ox, "oy": oy,
+                             "dx": ddx, "dy": ddy, "rotate": rot, "morphmat": morphmat,
                              "new_text": new_text, "count": rj["count"],
                              "rep_spans": rep_spans, "segs": seg_objs,
                              "rep_rgb": rep_rgb,
@@ -810,41 +852,61 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                 except Exception:
                     pass
 
-            # insert new line segment by segment at original baseline:
-            # replacement parts use the new style, untouched parts keep
-            # the original style, so e.g. only PIA turns red.
+            # insert new line segment by segment from the original origin,
+            # advancing along the original writing direction so vertical
+            # text stays vertical. Replacement parts use the new style,
+            # untouched parts keep the original style (e.g. only PIA red).
             for j in jobs:
                 rect = j["rect"]
-                x = rect.x0
-                y = j["base_y"]
-                if x < 0:
-                    x = 0
+                ox = min(max(j["ox"], 0), page.rect.x1 - 1)
+                oy = min(max(j["oy"], 0), page.rect.y1 - 1)
+                dx, dy = j.get("dx", 1.0), j.get("dy", 0.0)
+                rot, mmat = j.get("rotate", 0), j.get("morphmat")
+
+                def _scope_rect(off0, seg_w):
+                    ax0, ay0 = ox + dx * off0, oy + dy * off0
+                    ax1, ay1 = ox + dx * (off0 + seg_w), oy + dy * (off0 + seg_w)
+                    rx0, rx1 = min(ax0, ax1) - 1, max(ax0, ax1) + 1
+                    ry0, ry1 = min(ay0, ay1) - 1, max(ay0, ay1) + 1
+                    if abs(dx) >= abs(dy):
+                        ry0, ry1 = rect.y0, rect.y1
+                    else:
+                        rx0, rx1 = rect.x0, rect.x1
+                    return pymupdf.Rect(max(rx0, 0), max(ry0, 0),
+                                        min(rx1, page.rect.x1 - 1), min(ry1, page.rect.y1 - 1))
+
                 scope_rects = []
-                _cur = x
+                _off = 0.0
                 for _sg in j.get("segs", []):
                     _t = _sg["text"]
                     if _t == "":
                         continue
+                    _pt = pymupdf.Point(ox + dx * _off, oy + dy * _off)
                     kwargs = dict(fontname=_sg["fontname"], fontsize=_sg["size"], color=_sg["rgb"])
                     if _sg["fontfile"]:
                         kwargs["fontfile"] = _sg["fontfile"]
+                    if mmat is not None:
+                        kwargs["morph"] = (_pt, pymupdf.Matrix(*mmat))
+                    else:
+                        kwargs["rotate"] = rot if rot is not None else 0
                     try:
-                        page.insert_text(pymupdf.Point(_cur, y), _t, **kwargs)
+                        page.insert_text(_pt, _t, **kwargs)
                     except Exception:
                         try:
-                            page.insert_text(pymupdf.Point(_cur, y), _t,
-                                             fontname=_sg["fontname"], fontsize=_sg["size"], color=_sg["rgb"])
+                            _fb = dict(kwargs)
+                            _fb.pop("morph", None)
+                            _fb.pop("fontfile", None)
+                            page.insert_text(_pt, _t, **_fb)
                         except Exception:
-                            page.insert_text(pymupdf.Point(_cur, y), _t,
+                            page.insert_text(_pt, _t,
                                              fontsize=_sg["size"], color=_sg["rgb"])
                     try:
                         _w = measure_width(_t, _sg["fontname"], _sg["size"], _sg["fontfile"])
                     except Exception:
                         _w = 0
                     if _sg.get("is_rep"):
-                        scope_rects.append(pymupdf.Rect(_cur, rect.y0,
-                                                        min(page.rect.x1 - 1, _cur + _w + 1), rect.y1))
-                    _cur += _w
+                        scope_rects.append(_scope_rect(_off, _w))
+                    _off += _w
                 total += j["count"]
                 text_total += j["count"]
                 if not scope_rects:
@@ -852,8 +914,9 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                     try:
                         w = measure_width(j["new_text"], j["fontname"], j["size"], j["fontfile"])
                     except Exception:
-                        w = rect.width
-                    scope_rects = [pymupdf.Rect(x, rect.y0, min(page.rect.x1 - 1, x + w + 1), rect.y1)]
+                        _linelen = rect.height if abs(dy) > abs(dx) else rect.width
+                        w = _linelen
+                    scope_rects = [_scope_rect(0.0, w)]
                 if opts["highlight"]:
                     hc = hex_to_rgb(opts["highlight_hex"])
                     for new_rect in scope_rects:
@@ -871,10 +934,15 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                             a.set_colors(stroke=j["rgb"])
                             a.update()
                         except Exception:
-                            # fallback: draw a line
+                            # fallback: draw a line along the writing direction
                             try:
-                                p1 = pymupdf.Point(new_rect.x0, new_rect.y1 - 1)
-                                p2 = pymupdf.Point(new_rect.x1, new_rect.y1 - 1)
+                                if abs(dy) > abs(dx):
+                                    _mx = (new_rect.x0 + new_rect.x1) / 2 + 1
+                                    p1 = pymupdf.Point(_mx, new_rect.y0)
+                                    p2 = pymupdf.Point(_mx, new_rect.y1)
+                                else:
+                                    p1 = pymupdf.Point(new_rect.x0, new_rect.y1 - 1)
+                                    p2 = pymupdf.Point(new_rect.x1, new_rect.y1 - 1)
                                 page.draw_line(p1, p2, color=j["rgb"], width=0.8)
                             except Exception:
                                 pass
