@@ -542,14 +542,19 @@ def count_matches(pdf_path, find_str, match_case, whole_word):
 
 def replace_in_pdf(src, dst, find_str, replace_str, opts):
     """
-    opts: dict with match_case, whole_word, keep_original,
+    opts: dict with match_case, whole_word,
+          keep_font / keep_size / keep_color (each bool; fall back to
+          legacy keep_original for all three),
           bold, italic, underline, highlight, highlight_hex,
           custom_family(helv/cour/tiro), custom_size, custom_hex
     Returns (replacements_count, warning_or_None)
     """
     match_case = opts["match_case"]
     whole_word = opts["whole_word"]
-    keep_original = opts["keep_original"]
+    _legacy_keep = opts.get("keep_original", True)
+    keep_font = opts.get("keep_font", _legacy_keep)
+    keep_size = opts.get("keep_size", _legacy_keep)
+    keep_color = opts.get("keep_color", _legacy_keep)
 
     try:
         doc = pymupdf.open(src)
@@ -576,37 +581,44 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                 rect = rj["rect"]
                 span = rj["span"]
                 new_text = rj["new_text"]
-                if keep_original and span:
-                    fam, b, i = detect_family_and_flags(span.get("font", ""))
-                    size = float(span.get("size", 11))
-                    rgb = int_to_rgb(span.get("color", 0))
+                # per-attribute style: font / size / color each either
+                # inherited from the original span or taken from custom UI
+                if span:
+                    det_fam, det_b, det_i = detect_family_and_flags(span.get("font", ""))
+                    orig_size = float(span.get("size", 11))
+                    orig_rgb = int_to_rgb(span.get("color", 0))
                     try:
                         base_y = float(span.get("origin", [rect.x0, rect.y1 - 2])[1])
                     except Exception:
                         base_y = rect.y1 - 2
                     orig_font = span.get("font", "")
                 else:
-                    fam, b, i = opts["custom_family"], opts["bold"], opts["italic"]
-                    size = float(opts["custom_size"])
-                    rgb = hex_to_rgb(opts["custom_hex"])
+                    det_fam, det_b, det_i = opts["custom_family"], opts["bold"], opts["italic"]
+                    orig_size, orig_rgb = float(opts["custom_size"]), hex_to_rgb(opts["custom_hex"])
                     base_y = rect.y1 - 2
                     orig_font = ""
+                if keep_font and span:
+                    fam, b, i = det_fam, det_b, det_i
+                else:
+                    fam, b, i = opts["custom_family"], opts["bold"], opts["italic"]
                 if opts["bold"]:
                     b = True
                 if opts["italic"]:
                     i = True
                 fontname = BASE_FONTS.get((fam, b, i), "helv")
-                if not keep_original:
-                    fontname = BASE_FONTS.get((opts["custom_family"], opts["bold"], opts["italic"]), "helv")
-                fontfile = resolve_font(doc, orig_font, b, i, new_text) if keep_original else None
-                if not keep_original:
-                    # custom mode: map chosen family to a real ttf when possible
-                    fam_to_probe = {"helv": "arial.ttf", "tiro": "times.ttf", "cour": "cour.ttf"}.get(opts["custom_family"], "")
+                if keep_font and span:
+                    fontfile = resolve_font(doc, orig_font, b, i, new_text)
+                else:
+                    fontfile = None
+                    # custom font: map chosen family to a real ttf when possible
+                    fam_to_probe = {"helv": "arial.ttf", "tiro": "times.ttf", "cour": "cour.ttf"}.get(fam, "")
                     if fam_to_probe:
                         import os as _os2
                         _p = _os2.path.join(_os2.environ.get("WINDIR", r"C:\Windows"), "Fonts", fam_to_probe)
                         if _os2.path.exists(_p):
                             fontfile = _p
+                size = orig_size if (keep_size and span) else float(opts["custom_size"])
+                rgb = orig_rgb if (keep_color and span) else hex_to_rgb(opts["custom_hex"])
                 # shrink-to-fit against the ORIGINAL line width so longer text
                 # never spills over neighbouring symbols/words
                 if new_text:
@@ -775,7 +787,9 @@ class App(tk.Tk):
         self.var_replace = tk.StringVar()
         self.var_case = tk.BooleanVar(value=False)
         self.var_whole = tk.BooleanVar(value=True)
-        self.var_keep = tk.BooleanVar(value=True)
+        self.var_keep_font = tk.BooleanVar(value=True)
+        self.var_keep_size = tk.BooleanVar(value=True)
+        self.var_keep_color = tk.BooleanVar(value=True)
         self.var_bold = tk.BooleanVar(value=False)
         self.var_italic = tk.BooleanVar(value=False)
         self.var_underline = tk.BooleanVar(value=False)
@@ -818,16 +832,23 @@ class App(tk.Tk):
         tk.Label(self, text="3. How should the NEW word look?", font=("Arial", 12, "bold")).pack(anchor="w", **pad)
         sf = tk.Frame(self)
         sf.pack(fill="x", padx=10)
-        tk.Checkbutton(sf, text="Keep original font/size/color (recommended)", variable=self.var_keep,
-                       font=("Arial", 10), command=self.toggle_custom).pack(anchor="w")
+        tk.Checkbutton(sf, text="Original font", variable=self.var_keep_font,
+                       font=("Arial", 10), command=self.toggle_custom).pack(side="left")
+        tk.Checkbutton(sf, text="Original size", variable=self.var_keep_size,
+                       font=("Arial", 10), command=self.toggle_custom).pack(side="left", padx=12)
+        tk.Checkbutton(sf, text="Original color", variable=self.var_keep_color,
+                       font=("Arial", 10), command=self.toggle_custom).pack(side="left", padx=12)
         self.custom_frame = tk.Frame(self)
         self.custom_frame.pack(fill="x", padx=10)
         tk.Label(self.custom_frame, text="Font:", font=("Arial", 10)).grid(row=0, column=0, sticky="e")
-        ttk.Combobox(self.custom_frame, textvariable=self.var_family,
-                     values=["Helvetica", "Times", "Courier"], width=12, state="readonly").grid(row=0, column=1, padx=4)
+        self.cbo_family = ttk.Combobox(self.custom_frame, textvariable=self.var_family,
+                                       values=["Helvetica", "Times", "Courier"], width=12, state="readonly")
+        self.cbo_family.grid(row=0, column=1, padx=4)
         tk.Label(self.custom_frame, text="Size:", font=("Arial", 10)).grid(row=0, column=2, sticky="e")
-        tk.Spinbox(self.custom_frame, from_=6, to=72, textvariable=self.var_size, width=5, font=("Arial", 10)).grid(row=0, column=3, padx=4)
-        tk.Button(self.custom_frame, text="Text color", command=self.pick_text).grid(row=0, column=4, padx=4)
+        self.spin_size = tk.Spinbox(self.custom_frame, from_=6, to=72, textvariable=self.var_size, width=5, font=("Arial", 10))
+        self.spin_size.grid(row=0, column=3, padx=4)
+        self.btn_textcolor = tk.Button(self.custom_frame, text="Text color", command=self.pick_text)
+        self.btn_textcolor.grid(row=0, column=4, padx=4)
         self.btn_text_prev = tk.Label(self.custom_frame, text="   ", bg="#000000", width=4)
         self.btn_text_prev.grid(row=0, column=5)
 
@@ -862,12 +883,19 @@ class App(tk.Tk):
         self.toggle_custom()
 
     def toggle_custom(self):
-        state = "disabled" if self.var_keep.get() else "normal"
-        for child in self.custom_frame.winfo_children():
-            try:
-                child.configure(state=state)
-            except Exception:
-                pass
+        # each custom control is only editable when its "Original ..." tick is OFF
+        try:
+            self.cbo_family.configure(state="readonly" if not self.var_keep_font.get() else "disabled")
+        except Exception:
+            pass
+        try:
+            self.spin_size.configure(state="normal" if not self.var_keep_size.get() else "disabled")
+        except Exception:
+            pass
+        try:
+            self.btn_textcolor.configure(state="normal" if not self.var_keep_color.get() else "disabled")
+        except Exception:
+            pass
 
     def pick_text(self):
         c = colorchooser.askcolor(self.var_textcolor.get())[1]
@@ -923,10 +951,14 @@ class App(tk.Tk):
 
     def get_opts(self):
         fam_map = {"Helvetica": "helv", "Times": "tiro", "Courier": "cour"}
+        kf, ks, kc = self.var_keep_font.get(), self.var_keep_size.get(), self.var_keep_color.get()
         return {
             "match_case": self.var_case.get(),
             "whole_word": self.var_whole.get(),
-            "keep_original": self.var_keep.get(),
+            "keep_original": bool(kf and ks and kc),  # legacy compat
+            "keep_font": kf,
+            "keep_size": ks,
+            "keep_color": kc,
             "bold": self.var_bold.get(),
             "italic": self.var_italic.get(),
             "underline": self.var_underline.get(),

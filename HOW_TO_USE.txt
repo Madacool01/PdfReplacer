@@ -5,9 +5,12 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
 3. Type Find (old keyword) and Replace with (new keyword)
    - Whole word only: ON = safer (recommended)
    - Match case: OFF unless capitals matter
-4. New word look:
-   - Keep "Keep original font/size/color" ticked = new word looks like old one
-   - Untick it to choose Font / Size / Text color yourself
+4. New word look (mix and match per attribute):
+   - "Original font / size / color" ticks are independent - keep all three
+     ticked and the new word looks exactly like the old one
+   - Untick one to change just that: e.g. untick only "Original color"
+     and pick red Text color = same font and size, but red
+   - Untick "Original font" to choose Font, "Original size" for Size
    - Tick Bold / Italic / Underline / Highlight as you like
    - Highlight color button to change yellow to anything
 5. Save to: choose output folder (default "fixed"). Originals are NEVER changed.
