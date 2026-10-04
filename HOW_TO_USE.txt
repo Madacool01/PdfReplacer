@@ -5,6 +5,9 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
 3. Type Find (old keyword) and Replace with (new keyword)
    - Whole word only: ON = safer (recommended)
    - Match case: OFF unless capitals matter
+   - Where: pick "PDF text", "Bookmarks" (chapter names), or both.
+     E.g. Find "book" / Replace "paper" with Bookmarks = every
+     bookmark containing "book" is renamed, text untouched.
 4. New word look (mix and match per attribute):
    - "Original font / size / color" ticks are independent - keep all three
      ticked and the new word looks exactly like the old one
@@ -17,7 +20,8 @@ Dad's PDF Keyword Replacer - How to use (for Dad)
    - Highlight color button to change yellow to anything
 5. Save to: choose output folder (default "fixed"). Originals are NEVER changed.
 6. Click "Preview" first to see counts, then "REPLACE IN ALL FILES"
-7. Done! Check the output folder + replace_log.csv for per-file counts.
+7. Done! Check the output folder + replace_log.csv for per-file counts
+   (text replacements and bookmark replacements listed separately).
 
 Tips:
 - If the new word is longer, it auto-shrinks a bit to fit (no overlap).

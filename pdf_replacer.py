@@ -540,14 +540,80 @@ def count_matches(pdf_path, find_str, match_case, whole_word):
     return total
 
 
+def count_bookmark_matches(pdf_path, find_str, match_case, whole_word):
+    """Count find_str occurrences inside PDF bookmark (outline) titles."""
+    total = 0
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return 0
+    with doc:
+        try:
+            toc = doc.get_toc()
+        except Exception:
+            return 0
+        for entry in toc:
+            try:
+                _, n, _ = _sub_line_text_ex(entry[1], find_str, "", match_case, whole_word)
+            except Exception:
+                continue
+            total += n
+    return total
+
+
+def count_matches_all(pdf_path, find_str, match_case, whole_word):
+    """Return (text_matches, bookmark_matches) for Preview breakdown."""
+    return (count_matches(pdf_path, find_str, match_case, whole_word),
+            count_bookmark_matches(pdf_path, find_str, match_case, whole_word))
+
+
+def replace_bookmarks_in_doc(doc, find_str, replace_str, match_case, whole_word):
+    """Replace find_str in every bookmark title of an open document.
+
+    Returns the number of replacements. Only touches the outline when
+    at least one title matches, so bookmark-free PDFs are unaffected.
+    """
+    try:
+        toc = doc.get_toc()
+    except Exception:
+        return 0
+    if not toc or not find_str:
+        return 0
+    total = 0
+    changed = False
+    new_toc = []
+    for entry in toc:
+        try:
+            lvl, title = entry[0], entry[1]
+            rest = entry[2:]
+        except Exception:
+            new_toc.append(entry)
+            continue
+        try:
+            new_title, n, _ = _sub_line_text_ex(title, find_str, replace_str, match_case, whole_word)
+        except Exception:
+            new_toc.append(entry)
+            continue
+        if n > 0:
+            changed = True
+            total += n
+            new_toc.append([lvl, new_title] + list(rest))
+        else:
+            new_toc.append(entry)
+    if changed:
+        doc.set_toc(new_toc)
+    return total
+
+
 def replace_in_pdf(src, dst, find_str, replace_str, opts):
     """
     opts: dict with match_case, whole_word,
           keep_font / keep_size / keep_color (each bool; fall back to
           legacy keep_original for all three),
           bold, italic, underline, highlight, highlight_hex,
-          custom_family(helv/cour/tiro), custom_size, custom_hex
-    Returns (replacements_count, warning_or_None)
+          custom_family(helv/cour/tiro), custom_size, custom_hex,
+          replace_text (bool), replace_bookmarks (bool)
+    Returns (total_count, warning_or_None, text_count, bookmark_count)
     """
     match_case = opts["match_case"]
     whole_word = opts["whole_word"]
@@ -555,11 +621,13 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
     keep_font = opts.get("keep_font", _legacy_keep)
     keep_size = opts.get("keep_size", _legacy_keep)
     keep_color = opts.get("keep_color", _legacy_keep)
+    do_text = opts.get("replace_text", True)
+    do_bookmarks = opts.get("replace_bookmarks", False)
 
     try:
         doc = pymupdf.open(src)
     except Exception as e:
-        return 0, f"Cannot open: {e}"
+        return 0, f"Cannot open: {e}", 0, 0
     if doc.is_encrypted:
         try:
             doc.authenticate("")
@@ -567,11 +635,21 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
             pass
         if doc.is_encrypted:
             doc.close()
-            return 0, "Skipped (encrypted/password protected)"
+            return 0, "Skipped (encrypted/password protected)", 0, 0
 
     total = 0
+    text_total = 0
+    bm_total = 0
+    if do_bookmarks:
+        try:
+            bm_total = replace_bookmarks_in_doc(doc, find_str, replace_str, match_case, whole_word)
+            total += bm_total
+        except Exception:
+            pass
     try:
         for page in doc:
+            if not do_text:
+                break
             raw_jobs = collect_line_jobs(page, find_str, replace_str, match_case, whole_word)
             if not raw_jobs:
                 continue
@@ -768,6 +846,7 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
                                                         min(page.rect.x1 - 1, _cur + _w + 1), rect.y1))
                     _cur += _w
                 total += j["count"]
+                text_total += j["count"]
                 if not scope_rects:
                     # fallback (e.g. deletion with highlight on): whole line
                     try:
@@ -807,13 +886,13 @@ def replace_in_pdf(src, dst, find_str, replace_str, opts):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         doc.save(dst, garbage=4, deflate=True)
         doc.close()
-        return total, None
+        return total, None, text_total, bm_total
     except Exception as e:
         try:
             doc.close()
         except Exception:
             pass
-        return total, f"Error: {e}"
+        return total, f"Error: {e}", text_total, bm_total
 
 
 # ---------- UI ----------
@@ -829,6 +908,7 @@ class App(tk.Tk):
         self.var_replace = tk.StringVar()
         self.var_case = tk.BooleanVar(value=False)
         self.var_whole = tk.BooleanVar(value=True)
+        self.var_scope = tk.StringVar(value="text")
         self.var_keep_font = tk.BooleanVar(value=True)
         self.var_keep_size = tk.BooleanVar(value=True)
         self.var_keep_color = tk.BooleanVar(value=True)
@@ -870,6 +950,16 @@ class App(tk.Tk):
         of.pack(fill="x", padx=10)
         tk.Checkbutton(of, text="Match case", variable=self.var_case, font=("Arial", 10)).pack(side="left")
         tk.Checkbutton(of, text="Whole word only", variable=self.var_whole, font=("Arial", 10)).pack(side="left", padx=12)
+        wf = tk.Frame(self)
+        wf.pack(fill="x", padx=10, pady=4)
+        tk.Label(wf, text="Where:", font=("Arial", 10)).pack(side="left")
+        seg = tk.Frame(wf, relief="sunken", bd=1)
+        seg.pack(side="left", padx=6)
+        for _val, _txt in (("text", "PDF text"), ("bookmarks", "Bookmarks"),
+                           ("both", "Text + Bookmarks")):
+            tk.Radiobutton(seg, text=_txt, value=_val, variable=self.var_scope,
+                           indicatoron=0, width=16, font=("Arial", 10),
+                           selectcolor="#c8e6c9").pack(side="left", padx=1, pady=1)
 
         tk.Label(self, text="3. How should the NEW word look?", font=("Arial", 12, "bold")).pack(anchor="w", **pad)
         sf = tk.Frame(self)
@@ -994,9 +1084,12 @@ class App(tk.Tk):
     def get_opts(self):
         fam_map = {"Helvetica": "helv", "Times": "tiro", "Courier": "cour"}
         kf, ks, kc = self.var_keep_font.get(), self.var_keep_size.get(), self.var_keep_color.get()
+        scope = self.var_scope.get()
         return {
             "match_case": self.var_case.get(),
             "whole_word": self.var_whole.get(),
+            "replace_text": scope in ("text", "both"),
+            "replace_bookmarks": scope in ("bookmarks", "both"),
             "keep_original": bool(kf and ks and kc),  # legacy compat
             "keep_font": kf,
             "keep_size": ks,
@@ -1028,19 +1121,26 @@ class App(tk.Tk):
             return
         find = self.var_find.get()
         opts = self.get_opts()
-        total = 0
+        t_total, b_total = 0, 0
         per_file = []
         self.status.config(text="Counting...")
         self.update()
         for f in self.files:
-            c = count_matches(f, find, opts["match_case"], opts["whole_word"])
-            per_file.append((os.path.basename(f), c))
-            total += c
-        msg = f"Found {total} matches in {len(self.files)} files.\n\n" + "\n".join(f"{n}: {c}" for n, c in per_file[:20])
+            t, b = count_matches_all(f, find, opts["match_case"], opts["whole_word"])
+            if not opts["replace_text"]:
+                t = 0
+            if not opts["replace_bookmarks"]:
+                b = 0
+            per_file.append((os.path.basename(f), t, b))
+            t_total += t
+            b_total += b
+        total = t_total + b_total
+        msg = f"Found {total} matches in {len(self.files)} files ({t_total} in text, {b_total} in bookmarks).\n\n"
+        msg += "\n".join(f"{n}: {t} text, {b} bookmarks" for n, t, b in per_file[:20])
         if len(per_file) > 20:
             msg += f"\n...and {len(per_file) - 20} more files"
         messagebox.showinfo("Preview", msg)
-        self.status.config(text=f"Preview: {total} matches found.")
+        self.status.config(text=f"Preview: {total} matches found ({t_total} text, {b_total} bookmarks).")
 
     def run(self):
         if not self.validate():
@@ -1055,6 +1155,8 @@ class App(tk.Tk):
         self.prog["value"] = 0
         self.btn_go.config(state="disabled")
         grand = 0
+        grand_text = 0
+        grand_bm = 0
         rows = []
         for i, f in enumerate(self.files):
             self.status.config(text=f"Working {i + 1}/{len(self.files)}: {os.path.basename(f)}")
@@ -1066,20 +1168,22 @@ class App(tk.Tk):
                     dst = outdir / (Path(f).stem + "_fixed.pdf")
             except Exception:
                 pass
-            n, warn = replace_in_pdf(f, str(dst), find, repl, opts)
+            n, warn, tn, bn = replace_in_pdf(f, str(dst), find, repl, opts)
             grand += n
-            rows.append([f, str(dst), n, warn or "OK"])
+            grand_text += tn
+            grand_bm += bn
+            rows.append([f, str(dst), tn, bn, n, warn or "OK"])
             self.prog["value"] = i + 1
             self.update()
 
         log = outdir / "replace_log.csv"
         with open(log, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["source", "output", "replacements", "status"])
+            w.writerow(["source", "output", "text_replacements", "bookmark_replacements", "total", "status"])
             w.writerows(rows)
         self.btn_go.config(state="normal")
-        self.status.config(text=f"Done! {grand} replacements in {len(self.files)} files. Log: {log}")
-        messagebox.showinfo("Done", f"Done!\n{grand} replacements in {len(self.files)} files.\nSaved to: {outdir}\nLog: replace_log.csv")
+        self.status.config(text=f"Done! {grand} replacements ({grand_text} text, {grand_bm} bookmarks) in {len(self.files)} files. Log: {log}")
+        messagebox.showinfo("Done", f"Done!\n{grand} replacements ({grand_text} text, {grand_bm} bookmarks) in {len(self.files)} files.\nSaved to: {outdir}\nLog: replace_log.csv")
 
 
 if __name__ == "__main__":
