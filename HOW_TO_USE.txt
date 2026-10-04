@@ -1,0 +1,25 @@
+Dad's PDF Keyword Replacer - How to use (for Dad)
+
+1. Double-click dist\DadPdfReplacer.exe
+2. Click "Add PDFs" (pick files) or "Add Folder" (all 130 at once)
+3. Type Find (old keyword) and Replace with (new keyword)
+   - Whole word only: ON = safer (recommended)
+   - Match case: OFF unless capitals matter
+4. New word look:
+   - Keep "Keep original font/size/color" ticked = new word looks like old one
+   - Untick it to choose Font / Size / Text color yourself
+   - Tick Bold / Italic / Underline / Highlight as you like
+   - Highlight color button to change yellow to anything
+5. Save to: choose output folder (default "fixed"). Originals are NEVER changed.
+6. Click "Preview" first to see counts, then "REPLACE IN ALL FILES"
+7. Done! Check the output folder + replace_log.csv for per-file counts.
+
+Tips:
+- If the new word is longer, it auto-shrinks a bit to fit (no overlap).
+- Encrypted/password PDFs are skipped with a message.
+- Run again with another keyword any time - one pair per run.
+
+For you (developer):
+  python pdf_replacer.py        # run from source
+  pip install -r requirements.txt
+  Rebuild EXE: pyinstaller --onefile --windowed --name DadPdfReplacer pdf_replacer.py
